@@ -1,78 +1,82 @@
 #include <Arduino.h>
 
-// ====== CONFIGURAÇÃO DE HARDWARE ======
-#define SSI_CLK     25
-#define SSI_DATA    34
-#define SSI_BITS    24
-#define T_CLK_HIGH  5
-#define T_CLK_LOW   5
+#define SSI_CLOCK_PIN     25
+#define SSI_DATA_PIN      34
+#define SSI_NUM_BITS      24
 
-// ====== CONFIGURAÇÃO DE CONVERSÃO ======
-#define OFFSET_FIXO     10142794
-#define PULSOS_TOTAIS   (10725802.0 - 10142794.0)  // 583008 pulsos
-#define COMPRIMENTO_MM  320.0
-#define PULSO_PARA_MM   (COMPRIMENTO_MM / PULSOS_TOTAIS)  // ≈ 0.0005487
+#define CLOCK_HIGH_TIME   1
+#define CLOCK_LOW_TIME    1
 
-// ====== FUNÇÃO DE LEITURA SSI ======
-uint32_t readSSI() {
-  uint32_t value = 0;
+#define ENCODER_OFFSET        10142794
+#define ENCODER_MAX_COUNT     10725802
+#define TOTAL_PULSES          (ENCODER_MAX_COUNT - ENCODER_OFFSET)
+#define TRAVEL_DISTANCE_MM    320.0
+#define PULSE_TO_MM           (TRAVEL_DISTANCE_MM / TOTAL_PULSES)
+
+unsigned long lastReadTimeUs = 0;
+const unsigned long readIntervalUs = 100000;
+
+void beforeSetup() __attribute__((constructor));
+void beforeSetup() {
+  pinMode(SSI_CLOCK_PIN, OUTPUT);
+  digitalWrite(SSI_CLOCK_PIN, LOW);
+}
+
+uint32_t readEncoderSSI() {
+  uint32_t rawValue = 0;
 
   noInterrupts();
-  digitalWrite(SSI_CLK, LOW);
-  delayMicroseconds(T_CLK_LOW);
+  digitalWrite(SSI_CLOCK_PIN, LOW);
+  delayMicroseconds(CLOCK_LOW_TIME);
 
-  for (int i = 0; i < SSI_BITS; i++) {
-    digitalWrite(SSI_CLK, HIGH);
-    delayMicroseconds(T_CLK_HIGH);
+  for (int i = 0; i < SSI_NUM_BITS; i++) {
+    digitalWrite(SSI_CLOCK_PIN, HIGH);
+    delayMicroseconds(1);
 
-    value <<= 1;
-    if (digitalRead(SSI_DATA)) value |= 1;
+    rawValue <<= 1;
+    if (digitalRead(SSI_DATA_PIN)) rawValue |= 1;
 
-    digitalWrite(SSI_CLK, LOW);
-    delayMicroseconds(T_CLK_LOW);
+    delayMicroseconds(CLOCK_HIGH_TIME - 1);
+    digitalWrite(SSI_CLOCK_PIN, LOW);
+    delayMicroseconds(CLOCK_LOW_TIME);
   }
 
   interrupts();
-  return value;
+  return rawValue;
 }
 
-// ====== SETUP ======
 void setup() {
-  pinMode(SSI_CLK, OUTPUT);
-  pinMode(SSI_DATA, INPUT_PULLDOWN);
-  digitalWrite(SSI_CLK, LOW);
+  pinMode(SSI_CLOCK_PIN, OUTPUT);
+  pinMode(SSI_DATA_PIN, INPUT);
+  digitalWrite(SSI_CLOCK_PIN, LOW);
 
   Serial.begin(115200);
-  delay(1000);
+  delay(2000);
 
-  Serial.println("🔧 Leitura da régua JFT-40 iniciada...");
+  uint32_t v1 = 0, v2 = 0, v3 = 0;
+  do {
+    v1 = readEncoderSSI(); delay(100);
+    v2 = readEncoderSSI(); delay(100);
+    v3 = readEncoderSSI(); delay(100);
+  } while (!(v1 == v2 && v2 == v3));
+
+  Serial.println(v1);
+  lastReadTimeUs = micros();
 }
 
-// ====== LOOP COM CONVERSÃO PARA MM ======
 void loop() {
-  const uint8_t N = 5;  // número de leituras a serem suavizadas
-  static uint32_t buffer[N] = {0};
-  static uint8_t index = 0;
+  unsigned long currentTimeUs = micros();
 
-  // Lê nova posição bruta
-  buffer[index] = readSSI();
-  index = (index + 1) % N;
+  if (currentTimeUs - lastReadTimeUs >= readIntervalUs) {
+    lastReadTimeUs = currentTimeUs;
 
-  // Calcula média
-  uint32_t soma = 0;
-  for (uint8_t i = 0; i < N; i++) {
-    soma += buffer[i];
+    uint32_t rawEncoderValue = readEncoderSSI();
+    int32_t encoderOffsetCorrected = (int32_t)rawEncoderValue - ENCODER_OFFSET;
+    float positionMM = encoderOffsetCorrected * PULSE_TO_MM;
+
+    Serial.print("Raw: ");
+    Serial.print(rawEncoderValue);
+    Serial.print(" | mm: ");
+    Serial.println(positionMM, 3);
   }
-
-  uint32_t media_pulsos = soma / N;
-
-  // Aplica offset e conversão
-  int32_t pos_corrigida = (int32_t)media_pulsos - OFFSET_FIXO;
-  float pos_mm = pos_corrigida * PULSO_PARA_MM;
-
-  Serial.print("📏 Posição suavizada (mm): ");
-  Serial.println(pos_mm, 3);
-
-  delay(100);
 }
-
